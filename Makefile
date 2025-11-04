@@ -92,6 +92,17 @@ ebs-add: ## Adds a new EBS volume via ebs-add.yml.
 ebs-remove: ## Removes an existing EBS volume via ebs-remove.yml.
 	ansible-playbook -i hosts $(TAGS_STRING) $(EXTRA_ARGS) $(EXTRA_VARS) playbooks/ebs-remove.yml
 
+##@ KubeVirt Tasks
+.PHONY: vm-storage-migration
+vm-storage-migration: ## Live migrate VM storage between storage classes with validation (requires BAREMETAL=true)
+	@if [ "$(BAREMETAL)" = "false" ]; then echo "Error: vm-storage-migration requires BAREMETAL=true"; exit 1; fi
+	@if [ -f .venv/bin/activate ]; then \
+		echo "🐍 Activating Python virtual environment..."; \
+		source .venv/bin/activate && ansible-playbook -i hosts $(TAGS_STRING) $(EXTRA_ARGS) $(EXTRA_VARS) playbooks/vm-storage-migration.yml; \
+	else \
+		ansible-playbook -i hosts $(TAGS_STRING) $(EXTRA_ARGS) $(EXTRA_VARS) playbooks/vm-storage-migration.yml; \
+	fi
+
 ##@ CI / Linter tasks
 .PHONY: lint
 lint: ## Run ansible-lint on the codebase
