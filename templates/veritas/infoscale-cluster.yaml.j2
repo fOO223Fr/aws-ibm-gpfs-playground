@@ -12,6 +12,8 @@ spec:
   clusterInfo:
 {% for node in worker_nodes_name_list %}
     - nodeName: {{ node }}
+{% if boot_disk_by_path | length > 0 %}
       excludeDevice:
         - "{{ boot_disk_by_path }}"
+{% endif %}
 {% endfor %}

@@ -10,12 +10,17 @@
   register: veritas_license_check
   retries: 30
   delay: 10
-  until: veritas_license_check is succeeded
+  until: veritas_license_check.failed is not defined or not veritas_license_check.failed
+  changed_when: false
 
 - name: Create Veritas License
   kubernetes.core.k8s:
     state: present
     definition: "{{ lookup('file', '../../templates/veritas/license.yaml') }}"
+  register: veritas_license_result
+  retries: 10
+  delay: 5
+  until: veritas_license_result is succeeded
 
 - name: Get worker nodes
   kubernetes.core.k8s_info:
@@ -32,13 +37,22 @@
 # Get boot_disk_by_path just for one worker node. it is name in others usually
 - name: Get boot disk to exclude in infoscale cluster
   ansible.builtin.shell: |
-    oc debug node/{{ worker_nodes_name_list | first }} -- chroot /host bash -c ' 
-    boot_disk=$(readlink -f "$(findmnt -n -o SOURCE / | sed '\''s/p[0-9].*//'\'' )")
+    oc debug node/{{ worker_nodes_name_list | first }} -- chroot /host bash -c '
+    # Try /boot first, fall back to finding the parent device of root
+    boot_partition=$(findmnt -n -o SOURCE /boot 2>/dev/null || findmnt -n -o SOURCE /)
+    if [[ -b "$boot_partition" ]]; then
+      # Get the parent device (strip partition number)
+      boot_disk=$(lsblk -ndo PKNAME "$boot_partition" 2>/dev/null || echo "$boot_partition" | sed "s/p\?[0-9]*$//")
+      # Ensure we have /dev/ prefix
+      [[ "$boot_disk" =~ ^/dev/ ]] || boot_disk="/dev/$boot_disk"
+      # Find the by-path entry
       for d in /dev/disk/by-path/*; do
         if [[ "$(readlink -f "$d")" == "$boot_disk" ]]; then
           echo "$d"
+          break
         fi
       done
+    fi
     '
   register: boot_disk_by_path
 
@@ -46,10 +60,18 @@
   set_fact:
     boot_disk_by_path: "{{ boot_disk_by_path.stdout }}"
 
+- name: Display boot disk detection result
+  debug:
+    msg: "Boot disk by-path: {{ boot_disk_by_path if boot_disk_by_path | length > 0 else 'NOT FOUND - InfoScaleCluster will use all available disks' }}"
+
 - name: Deploy InfoScaleCluster
   kubernetes.core.k8s:
     state: present
     definition: "{{ lookup('template', '../../templates/veritas/infoscale-cluster.yaml.j2') }}"
+  register: infoscale_cluster_result
+  retries: 10
+  delay: 5
+  until: infoscale_cluster_result is succeeded
 
 # Assuming that the default StorageClass is gp3-csi
 - name: Ensure gp3-csi StorageClass is not default

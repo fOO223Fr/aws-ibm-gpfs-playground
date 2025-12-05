@@ -17,7 +17,10 @@
   kubernetes.core.k8s:
     state: present
     definition: "{{ lookup('file', '../../templates/veritas/nfd-cr.yaml') | from_yaml }}"
-
+  register: nfd_cr_result
+  retries: 10
+  delay: 5
+  until: nfd_cr_result is succeeded
 
 - name: Apply Cert Manager Operator resources
   kubernetes.core.k8s:
@@ -43,3 +46,7 @@
   kubernetes.core.k8s:
     state: present
     definition: "{{ lookup('file', '../../templates/veritas/hyperconverged.yaml') | from_yaml_all }}"
+  register: hco_cr_result
+  retries: 10
+  delay: 5
+  until: hco_cr_result is succeeded

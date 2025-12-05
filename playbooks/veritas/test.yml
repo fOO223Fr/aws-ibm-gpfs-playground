@@ -22,14 +22,14 @@
       - (isc_info.resources[0].status.phase       | default('')) == "Running"
       - (isc_info.resources[0].status.clusterState | default('')) == "Healthy"
       - isc_info.resources[0].status.diskgroups is defined
-      - isc_info.resources[0].status.diskgroups | length > 0
+      - (isc_info.resources[0].status.diskgroups | default([]) | length) > 0
     success_msg: >-
-      InfoScaleCluster is Running, Healthy, and has {{ isc_info.resources[0].status.diskgroups | length }} diskgroup(s)
+      InfoScaleCluster is Running, Healthy, and has {{ isc_info.resources[0].status.diskgroups | default([]) | length }} diskgroup(s)
     fail_msg: >-
       InfoScaleCluster check failed:
         phase={{ isc_info.resources[0].status.phase | default('MISSING') }},
         clusterState={{ isc_info.resources[0].status.clusterState | default('MISSING') }},
-        diskgroups={{ isc_info.resources[0].status.diskgroups | default('MISSING') }}
+        diskgroups={{ isc_info.resources[0].status.diskgroups | default([]) | length }}
   tags: test
 
 - name: Deploy PVC + Deployment workload
