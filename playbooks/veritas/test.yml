@@ -1,5 +1,6 @@
 - name: Get InfoScaleCluster
   kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig }}"
     api_version: infoscale.veritas.com/v1
     kind: InfoScaleCluster
     namespace: infoscale-vtas
@@ -9,6 +10,7 @@
 
 - name: Get InfoScaleCluster
   kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig }}"
     api_version: infoscale.veritas.com/v1
     kind: InfoScaleCluster
     namespace: infoscale-vtas
@@ -34,6 +36,7 @@
 
 - name: Deploy PVC + Deployment workload
   kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
     state: present
     definition: "{{ lookup('file', '../../templates/veritas/test-workload.yaml') }}"
     namespace: default
@@ -41,6 +44,7 @@
 
 - name: Wait for infoscale-claim PVC to be Bound
   kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig }}"
     api_version: v1
     kind: PersistentVolumeClaim
     namespace: default
@@ -53,6 +57,7 @@
 
 - name: Wait for containertools Pod to be Running
   kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig }}"
     api_version: v1
     kind: Pod
     namespace: default
@@ -68,6 +73,7 @@
 
 - name: Delete containertools Deployment
   kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
     state: absent
     api_version: apps/v1
     kind: Deployment
@@ -77,6 +83,7 @@
 
 - name: Delete infoscale-claim PVC
   kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
     state: absent
     api_version: v1
     kind: PersistentVolumeClaim

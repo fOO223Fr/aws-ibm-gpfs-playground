@@ -1,5 +1,6 @@
 - name: Gather all VirtualMachine resources in test-vms
   kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig }}"
     api_version: kubevirt.io/v1
     kind: VirtualMachine
     namespace: test-vms
@@ -9,6 +10,7 @@
 
 - name: Delete every VM in test-vms
   kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
     state: absent
     api_version: kubevirt.io/v1
     kind: VirtualMachine
@@ -21,6 +23,7 @@
 
 - name: Wait for all VMs in test-vms namespace to be deleted
   kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig }}"
     api_version: kubevirt.io/v1
     kind: VirtualMachine
     namespace: test-vms
@@ -32,6 +35,7 @@
 
 - name: Wait until no PVCs remain in test-vms namespace
   kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig }}"
     kind: PersistentVolumeClaim
     namespace: test-vms
   register: pvc_list
@@ -42,6 +46,7 @@
 
 - name: Delete StorageClass infoscale
   kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
     state: absent
     api_version: storage.k8s.io/v1
     kind: StorageClass
@@ -51,6 +56,7 @@
 
 - name: Delete InfoScaleCluster infoscalecluster-dev
   kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
     state: absent
     api_version: infoscale.veritas.com/v1
     kind: InfoScaleCluster
@@ -61,6 +67,7 @@
 
 - name: Delete Veritas License license-dev
   kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
     state: absent
     api_version: vlic.veritas.com/v1
     kind: License
@@ -71,6 +78,7 @@
 
 - name: Delete namespace infoscale-vtas
   kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
     state: absent
     api_version: v1
     kind: Namespace

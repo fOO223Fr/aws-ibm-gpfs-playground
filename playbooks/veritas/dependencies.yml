@@ -1,10 +1,12 @@
 - name: Apply NFD Operator resources
   kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
     state: present
     definition: "{{ lookup('file', '../../templates/veritas/nfd-operator.yaml') | from_yaml_all }}"
 
 - name: Wait for NodeFeatureDiscovery CRD to be available
   kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig }}"
     api_version: nfd.openshift.io/v1
     kind: NodeFeatureDiscovery
   register: nfd_crd_check
@@ -15,6 +17,7 @@
 
 - name: Apply NodeFeatureDiscovery CR
   kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
     state: present
     definition: "{{ lookup('file', '../../templates/veritas/nfd-cr.yaml') | from_yaml }}"
   register: nfd_cr_result
@@ -24,16 +27,19 @@
 
 - name: Apply Cert Manager Operator resources
   kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
     state: present
     definition: "{{ lookup('file', '../../templates/veritas/cert-manager.yaml') | from_yaml_all }}"
 
 - name: Apply Openshift Virtualization resources
   kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
     state: present
     definition: "{{ lookup('file', '../../templates/veritas/virtualization-operator.yaml') | from_yaml_all }}"
 
 - name: Wait for HyperConverged CRD to be available
   kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig }}"
     api_version: hco.kubevirt.io/v1beta1
     kind: HyperConverged
   register: hco_crd_check
@@ -44,6 +50,7 @@
 
 - name: Apply Openshift Virtualization CR
   kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
     state: present
     definition: "{{ lookup('file', '../../templates/veritas/hyperconverged.yaml') | from_yaml_all }}"
   register: hco_cr_result

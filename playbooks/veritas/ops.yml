@@ -1,5 +1,6 @@
 - name: Get worker nodes
   kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig }}"
     kind: Node
     label_selectors:
       - "node-role.kubernetes.io/worker"
@@ -16,6 +17,7 @@
 # dd if=/dev/zero of=/dev/nvme1n1 bs=16K count=19660800
 - name: Get boot disk to exclude in infoscale cluster
   ansible.builtin.shell: |
+    export KUBECONFIG="{{ kubeconfig }}"
     oc debug node/{{ worker_nodes_name_list | first }} -- chroot /host bash -c ' 
     dd if=/dev/zero of=/dev/nvme1n1 bs=16K count=19660800
     '
