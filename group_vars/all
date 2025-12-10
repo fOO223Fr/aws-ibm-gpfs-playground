@@ -1,4 +1,7 @@
 ---
+# Use the venv Python interpreter for Ansible
+ansible_python_interpreter: "{{ lookup('env', 'VIRTUAL_ENV') }}/bin/python"
+
 cpu_arch: >-
   {%- if ansible_architecture == "aarch64" -%}
     arm64
@@ -30,7 +33,6 @@ butane_arch: >-
   {%- else -%}
     {{ ansible_architecture }}
   {%- endif -%}
-
 
 # Default version to be used, run "make ocp-versions" to see which are the latest
 # ones and download them with "make ocp-clients"
@@ -140,7 +142,7 @@ brew_registry_username: "{{ lookup('file', '~/.brew_registry_user' | expanduser)
 brew_registry_password: "{{ lookup('file', '~/.brew_registry_pass' | expanduser) }}"
 
 stage_registry_url: "registry.stage.redhat.io"
-stage_registry_username: "{{ lookup('file', '~/.stage_registry_user' | expanduser) }}" 
-stage_registry_password: "{{ lookup('file', '~/.stage_registry_pass' | expanduser) }}" 
+stage_registry_username: "{{ lookup('file', '~/.stage_registry_user' | expanduser) }}"
+stage_registry_password: "{{ lookup('file', '~/.stage_registry_pass' | expanduser) }}"
 
 internal_registry_ns: openshift-marketplace

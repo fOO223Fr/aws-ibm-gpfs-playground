@@ -144,6 +144,9 @@ test-center_banner: ## Test the center_banner function
 # or `make veritas TAGS=dependencies` to just install dependencies
 # or `make veritas TAGS=install` to install veritas stack 
 # or `make veritas TAGS=cleanup` to uninstall veritas stack
+# or `make veritas TAGS=test` to test veritas stack
+# or `make veritas TAGS=perf-test` to run VM cloning performance test
+# or `make veritas TAGS=perf-test EXTRA_VARS="-e num_vms=100"` to test with custom VM count
 .PHONY: veritas
 veritas: ## Provision cluster with minimal install and setup Veritas stack
 	@echo "TAGS: $(TAGS)"

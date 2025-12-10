@@ -1,0 +1,55 @@
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  labels:
+    kubevirt.io/vm: vm-cirros-{{ vm_number }}
+  name: vm-cirros-{{ vm_number }}
+  namespace: test-vms
+spec:
+  dataVolumeTemplates:
+  - metadata:
+      name: cirros-dv-{{ vm_number }}
+    spec:
+      preallocation: false
+      source:
+        pvc:
+          name: cirros-dv-1
+          namespace: test-vms
+      storage:
+        resources:
+          requests:
+            storage: 1Gi
+        storageClassName: infoscale
+        accessModes:
+        - ReadWriteMany
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: vm-cirros-{{ vm_number }}
+    spec:
+      domain:
+        devices:
+          disks:
+          - disk:
+              bus: virtio
+            name: rootdisk
+          - disk:
+              bus: virtio
+            name: cloudinitdisk
+        resources:
+          requests:
+            memory: 128Mi
+      terminationGracePeriodSeconds: 0
+      volumes:
+      - dataVolume:
+          name: cirros-dv-{{ vm_number }}
+        name: rootdisk
+      - cloudInitNoCloud:
+          userData: |
+            #!/bin/sh
+
+            echo 'printed from cloud-init userdata'
+        name: cloudinitdisk
+

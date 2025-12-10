@@ -31,3 +31,8 @@
       include_tasks: ops.yml
       tags: ops
       when: "'ops' in ansible_run_tags"
+
+    - name: Performance Test for Veritas InfoScale
+      include_tasks: perf-test.yml
+      tags: perf-test
+      when: "'perf-test' in ansible_run_tags"
