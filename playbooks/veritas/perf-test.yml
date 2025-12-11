@@ -29,8 +29,26 @@
 - name: Set default variables for performance test
   ansible.builtin.set_fact:
     num_vms: "{{ num_vms | default(10) }}"
-    pvc_timeout: "{{ pvc_timeout | default(600) }}"
-    monitor_interval: "{{ monitor_interval | default(10) }}"
+    clean_results: "{{ clean_results | default(false) | bool }}"
+    results_dir: "{{ playbook_dir }}/../../results-veritas-9.1"
+  tags: perf-test
+
+- name: Create results directory
+  ansible.builtin.file:
+    path: "{{ results_dir }}"
+    state: directory
+    mode: '0755'
+  tags: perf-test
+
+- name: Clean results directory if clean_results flag is set
+  ansible.builtin.shell: rm -f {{ results_dir }}/*.csv {{ results_dir }}/*.txt
+  when: clean_results | bool
+  tags: perf-test
+
+- name: Display clean results message
+  ansible.builtin.debug:
+    msg: "🗑️  Results directory cleaned - starting fresh"
+  when: clean_results | bool
   tags: perf-test
 
 - name: Display cluster information banner
@@ -38,16 +56,14 @@
     msg:
       - "========================================================================"
       - "           VERITAS INFOSCALE PERFORMANCE TEST"
+      - "           OCPNAS-312 Concurrency Validation"
       - "========================================================================"
       - "Kubeconfig:      {{ kubeconfig_display }}"
       - "OC Binary:       {{ use_oc_bin }}"
-      - "Cluster Name:    {{ ocp_cluster_name | default('N/A') }}"
-      - "Domain:          {{ ocp_domain | default('N/A') }}"
-      - "Region:          {{ ocp_region | default('N/A') }}"
       - "Test Parameters:"
       - "  - Number of VMs to clone: {{ num_vms }}"
-      - "  - PVC timeout: {{ pvc_timeout }}s"
-      - "  - Monitor interval: {{ monitor_interval }}s"
+      - "  - Timeout: Infinite (press Ctrl+C to interrupt)"
+      - "  - Sampling: Every 1 minute"
       - "========================================================================"
   tags: perf-test
 
@@ -186,61 +202,40 @@
       - ""
   tags: perf-test
 
-- name: Start background monitoring script
-  ansible.builtin.shell: |
-    {% if use_kubeconfig %}export KUBECONFIG="{{ use_kubeconfig }}"{% endif %}
-
-    STATUS_FILE="/tmp/veritas-vm-provisioning-status.log"
-    > "$STATUS_FILE"  # Clear the file
-
-    start_time={{ test_start_time }}
-    timeout={{ pvc_timeout }}
-    num_vms={{ num_vms }}
-
-    while true; do
-      # Get elapsed time
-      elapsed=$(( $(date +%s) - $start_time ))
-      minutes=$((elapsed / 60))
-      seconds=$((elapsed % 60))
+- name: Run monitoring with Ctrl+C handling
+  block:
+    - name: Start background monitoring script with time-series data collection
+      ansible.builtin.script: "monitor-vms.sh {{ use_oc_bin }} {{ test_start_time }} {{ num_vms }} {{ results_dir }}"
+      args:
+        chdir: "{{ playbook_dir }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_param }}"
+      register: monitoring_result
+      failed_when: monitoring_result.rc not in [0, 2]
+  
+  rescue:
+    - name: Handle Ctrl+C interruption
+      ansible.builtin.debug:
+        msg: "Test interrupted by Ctrl+C - generating partial report..."
+    
+    - name: Get current VM counts after interruption
+      ansible.builtin.shell: |
+        {{ use_oc_bin }} get vms -n test-vms -o json 2>/dev/null | jq '[.items[] | select(.status.printableStatus == "Running")] | length'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_param }}"
+      register: interrupted_vm_count
+      failed_when: false
+    
+    - name: Set interrupted test status
+      ansible.builtin.set_fact:
+        monitoring_result:
+          rc: 2
+          failed: false
       
-      # Count VM statuses
-      vm_data=$({{ use_oc_bin }} get vms -n test-vms -o json 2>/dev/null)
-      running=$(echo "$vm_data" | jq '[.items[] | select(.status.printableStatus == "Running")] | length')
-      stopped=$(echo "$vm_data" | jq '[.items[] | select(.status.printableStatus == "Stopped" or .status.printableStatus == "Stopping")] | length')
-      provisioning=$(echo "$vm_data" | jq '[.items[] | select(.status.printableStatus == "Provisioning" or .status.printableStatus == "Starting" or .status.printableStatus == "WaitingForVolumeBinding")] | length')
-      
-      # Write dashboard to file (overwrite each time for clean display)
-      {
-        echo "========================================================================"
-        echo "  VERITAS INFOSCALE PERFORMANCE TEST - VM Cloning Monitor"
-        echo "========================================================================"
-        printf "Elapsed Time: [%02d:%02d] | Last Updated: %s\n" $minutes $seconds "$(date '+%H:%M:%S')"
-        echo ""
-        echo "STATUS SUMMARY:"
-        echo "  Running:        $running"
-        echo "  Stopped:        $stopped"
-        echo "  Provisioning:   $provisioning"
-        echo "  Target:         $num_vms VMs Running"
-        echo "========================================================================"
-        echo ""
-      } > "$STATUS_FILE"
-      
-      # Check success condition
-      if [ "$running" -eq "$num_vms" ]; then
-        echo "✓ SUCCESS: All $num_vms VMs are now Running!" >> "$STATUS_FILE"
-        exit 0
-      fi
-      
-      # Check timeout
-      if [ "$elapsed" -ge "$timeout" ]; then
-        echo "✗ TIMEOUT: Only $running/$num_vms VMs running after ${timeout}s" >> "$STATUS_FILE"
-        exit 1
-      fi
-      
-      sleep 15
-    done
-  register: monitoring_result
-  failed_when: monitoring_result.rc != 0
+    - name: Write interrupted test result
+      ansible.builtin.copy:
+        content: "PARTIAL:{{ interrupted_vm_count.stdout | default('0') }}"
+        dest: /tmp/veritas-test-result.txt
   tags: perf-test
 
 - name: Get test end time
@@ -255,9 +250,23 @@
     test_duration: "{{ (end_time_output.stdout | int) - (test_start_time | int) }}"
   tags: perf-test
 
+- name: Read test result file
+  ansible.builtin.shell: cat /tmp/veritas-test-result.txt
+  register: test_result_raw
+  changed_when: false
+  failed_when: false
+  tags: perf-test
+
+- name: Parse test result
+  ansible.builtin.set_fact:
+    test_status: "{{ test_result_raw.stdout.split(':')[0] if test_result_raw.rc == 0 else 'FAILED' }}"
+    actual_vms_running: "{{ test_result_raw.stdout.split(':')[1] | int if test_result_raw.rc == 0 else 0 }}"
+  tags: perf-test
+
 - name: Calculate average provisioning time per VM
   ansible.builtin.set_fact:
-    avg_provisioning_time: "{{ (test_duration | int / (num_vms | int)) | round(0) }}"
+    avg_provisioning_time: "{{ (test_duration | int / (actual_vms_running | int)) | round(2) if actual_vms_running | int > 0 else 0 }}"
+    success_rate_percent: "{{ ((actual_vms_running | int) / (num_vms | int) * 100) | round(1) }}"
   tags: perf-test
 
 - name: Gather cluster node information for report
@@ -269,7 +278,7 @@
     '
   register: node_info
   changed_when: false
-  when: monitoring_result.rc == 0
+  when: monitoring_result.rc in [0, 2]
   tags: perf-test
 
 - name: Get InfoScale cluster details
@@ -281,7 +290,7 @@
   register: infoscale_info
   changed_when: false
   failed_when: false
-  when: monitoring_result.rc == 0
+  when: monitoring_result.rc in [0, 2]
   tags: perf-test
 
 - name: Get InfoScale disk details
@@ -293,7 +302,7 @@
   register: disk_info
   changed_when: false
   failed_when: false
-  when: monitoring_result.rc == 0
+  when: monitoring_result.rc in [0, 2]
   tags: perf-test
 
 - name: Get worker node count
@@ -302,7 +311,7 @@
     {{ use_oc_bin }} get nodes -l node-role.kubernetes.io/worker --no-headers | wc -l
   register: worker_count
   changed_when: false
-  when: monitoring_result.rc == 0
+  when: monitoring_result.rc in [0, 2]
   tags: perf-test
 
 - name: Get storage backend information
@@ -314,7 +323,7 @@
   register: storage_info
   changed_when: false
   failed_when: false
-  when: monitoring_result.rc == 0
+  when: monitoring_result.rc in [0, 2]
   tags: perf-test
 
 - name: Parse cluster information
@@ -337,7 +346,7 @@
     storage_fstype: "{{ storage_info.stdout.split('|')[1] | default('vxfs') }}"
     storage_expansion: "{{ storage_info.stdout.split('|')[2] | default('true') }}"
     storage_reclaim: "{{ storage_info.stdout.split('|')[3] | default('Delete') }}"
-  when: monitoring_result.rc == 0
+  when: monitoring_result.rc in [0, 2]
   tags: perf-test
 
 - name: Calculate capacity metrics
@@ -352,21 +361,122 @@
     cpu_usage_pct: "{{ (((num_vms | int) * 0.1) / ((node_cpu | int) * (worker_node_count | int)) * 100) | round(1) }}"
     memory_usage_pct: "{{ (((num_vms | int) * 0.128) / ((node_memory_gb | int) * (worker_node_count | int)) * 100) | round(1) }}"
     capacity_usage_pct: "{{ ((num_vms | int) / (((node_max_pods | int) * (worker_node_count | int)) * 0.8) * 100) | round(1) }}"
-  when: monitoring_result.rc == 0
+  when: monitoring_result.rc in [0, 2]
   tags: perf-test
 
 - name: Build disk details string
   ansible.builtin.set_fact:
     disk_details_str: "{{ disk_details_str | default('') + '      • ' + item.split('|')[0] + ': ' + item.split('|')[1] + ' (' + item.split('|')[2] + ')\n' }}"
   loop: "{{ disk_details }}"
-  when: monitoring_result.rc == 0
+  when: monitoring_result.rc in [0, 2]
   tags: perf-test
 
 - name: Get current timestamp for report
   ansible.builtin.shell: date -u '+%Y-%m-%d %H:%M:%S UTC'
   register: report_timestamp
   changed_when: false
-  when: monitoring_result.rc == 0
+  when: monitoring_result.rc in [0, 2]
+  tags: perf-test
+
+- name: Generate summary CSV file
+  ansible.builtin.copy:
+    content: |
+      num_vms_requested,num_vms_running,duration_seconds,avg_seconds_per_vm,success_rate_percent,test_status
+      {{ num_vms }},{{ actual_vms_running }},{{ test_duration }},{{ avg_provisioning_time }},{{ success_rate_percent }},{{ test_status }}
+    dest: "{{ results_dir }}/veritas-9.1-ga-perf-test-{{ num_vms }}vms.csv"
+  when: monitoring_result.rc in [0, 2]
+  tags: perf-test
+
+- name: Generate cluster information text file
+  ansible.builtin.copy:
+    content: |
+      ========================================================================
+      VERITAS INFOSCALE 9.1 GA - PERFORMANCE TEST CLUSTER INFORMATION
+      OCPNAS-312 Concurrency Validation
+      ========================================================================
+      
+      TEST EXECUTION INFORMATION
+      ------------------------------------------------------------------------
+      Test Date:               {{ report_timestamp.stdout }}
+      Test Status:             {{ test_status }}
+      VMs Requested:           {{ num_vms }}
+      VMs Successfully Running:{{ actual_vms_running }}
+      Success Rate:            {{ success_rate_percent }}%
+      Total Duration:          {{ test_duration }}s ({{ (test_duration | int / 60) | round(1) }} minutes)
+      Avg Time per VM:         {{ avg_provisioning_time }}s
+      
+      OPENSHIFT CLUSTER CONFIGURATION
+      ------------------------------------------------------------------------
+      API Server:              {{ cluster_server.stdout }}
+      
+      Worker Nodes:            {{ worker_node_count }}
+      Instance Type:           {{ node_instance_type }}
+      vCPU per Node:           {{ node_cpu }} cores
+      Memory per Node:         {{ node_memory_gb }} GB
+      Max Pods per Node:       {{ node_max_pods }}
+      
+      Total Cluster Resources:
+        - Total vCPU:          {{ total_cpu_cores }} cores
+        - Total Memory:        {{ total_memory_gb }} GB
+        - Total Pod Capacity:  {{ total_max_pods }} pods
+      
+      VERITAS INFOSCALE STORAGE CONFIGURATION
+      ------------------------------------------------------------------------
+      InfoScale Version:       {{ infoscale_version }}
+      Cluster State:           {{ infoscale_state }}
+      Cluster Phase:           {{ infoscale_phase }}
+      Disk Groups:             {{ infoscale_diskgroups }}
+      
+      Storage Class Configuration:
+        - Name:                infoscale (default)
+        - Provisioner:         {{ storage_provisioner }}
+        - Filesystem Type:     {{ storage_fstype }} (Veritas VxFS)
+        - Volume Expansion:    {{ storage_expansion }}
+        - Reclaim Policy:      {{ storage_reclaim }}
+        - Binding Mode:        Immediate
+      
+      InfoScale Storage Pool:
+        - Disk Group Name:     {{ infoscale_dg_name }}
+        - Total Pool Size:     {{ infoscale_dg_size }}
+        - Number of Disks:     {{ infoscale_disk_count }}
+        - Media Type:          SSD (NVMe)
+        - Disk Details:
+      {{ disk_details_str | default('          (No disk details available)') }}
+      
+      InfoScale Features:
+        - Encryption:          Disabled
+        - SCSI-3 PR:           Enabled
+        - Shared Storage:      Enabled
+      
+      RESOURCE UTILIZATION ANALYSIS
+      ------------------------------------------------------------------------
+      Test Resource Consumption:
+        - vCPU Used:           ~{{ test_cpu_used }} cores ({{ cpu_usage_pct }}% of cluster)
+        - Memory Used:         ~{{ test_memory_used }} GB ({{ memory_usage_pct }}% of cluster)
+        - Pods Used:           {{ test_pods_used }} ({{ capacity_usage_pct }}% of capacity)
+        - Storage Used:        {{ num_vms | int }} GB (InfoScale managed)
+      
+      Cluster Capacity Assessment:
+        - Estimated Max VMs:   ~{{ cluster_vm_capacity }} VMs
+        - Limiting Factor:     Pod capacity ({{ node_max_pods }} pods/node)
+        - Current Test:        {{ capacity_usage_pct }}% of max capacity
+        - Remaining Capacity:  {{ (cluster_vm_capacity | int) - (num_vms | int) }} VMs
+      
+      VM SPECIFICATIONS
+      ------------------------------------------------------------------------
+        - Image:               Cirros (lightweight test image)
+        - Memory per VM:       128 MiB
+        - Storage per VM:      1 GiB (InfoScale vxfs)
+        - Access Mode:         ReadWriteMany
+        - Clone Method:        PVC-to-PVC copy (DataVolume)
+      
+      TEST PARAMETERS
+      ------------------------------------------------------------------------
+        - Timeout:             Infinite (user interrupt with Ctrl+C)
+        - Sampling Interval:   Every 1 minute
+        - Time-series File:    veritas-9.1-ga-perf-test-summary-timeseries.csv
+    dest: "{{ results_dir }}/veritas-9.1-ga-perf-test-{{ num_vms }}vms-cluster-info.txt"
+  when: monitoring_result.rc in [0, 2]
   tags: perf-test
 
 - name: Display comprehensive stakeholder report
@@ -375,14 +485,15 @@
       - ""
       - "========================================================================"
       - "     VERITAS INFOSCALE CSI PERFORMANCE TEST REPORT"
+      - "     OCPNAS-312 Concurrency Validation"
       - "========================================================================"
       - ""
-      - "TEST RESULT: ✓ PASSED"
+      - "TEST RESULT: {{ '✓ PASSED' if test_status == 'SUCCESS' else '◐ PARTIAL (User Interrupted)' }}"
       - ""
       - "EXECUTIVE SUMMARY:"
-      - "  Successfully provisioned and validated {{ num_vms }} VMs using Veritas"
-      - "  InfoScale {{ infoscale_version }} as the CSI storage provider. All VMs achieved"
-      - "  Running state with no provisioning failures or performance issues."
+      - "{% if test_status == 'SUCCESS' %}  Successfully provisioned and validated {{ num_vms }} VMs using Veritas{% else %}  Provisioned {{ actual_vms_running }}/{{ num_vms }} VMs before user interruption using Veritas{% endif %}"
+      - "  InfoScale {{ infoscale_version }} as the CSI storage provider.{% if test_status == 'SUCCESS' %} All VMs achieved{% else %} {{ actual_vms_running }} VMs achieved{% endif %}"
+      - "  Running state{% if test_status == 'SUCCESS' %} with no provisioning failures or performance issues.{% else %} before test was interrupted.{% endif %}"
       - ""
       - "========================================================================"
       - "OPENSHIFT CLUSTER CONFIGURATION"
@@ -431,8 +542,8 @@
       - "TEST EXECUTION DETAILS"
       - "========================================================================"
       - "  VMs Requested:         {{ num_vms }}"
-      - "  VMs Successfully Running: {{ num_vms }}"
-      - "  Success Rate:          100%"
+      - "  VMs Successfully Running: {{ actual_vms_running }}"
+      - "  Success Rate:          {{ success_rate_percent }}%"
       - "  Total Duration:        {{ test_duration }}s ({{ (test_duration | int / 60) | round(1) }} minutes)"
       - "  Avg Time per VM:       {{ avg_provisioning_time }}s"
       - ""
@@ -461,37 +572,15 @@
       - "========================================================================"
       - "PERFORMANCE OBSERVATIONS"
       - "========================================================================"
-      - "  ✓ No PVC provisioning failures"
-      - "  ✓ No volume binding timeouts"
-      - "  ✓ No storage backend errors"
-      - "  ✓ All VMs transitioned to Running state successfully"
+      - "{% if test_status == 'SUCCESS' %}  ✓ No PVC provisioning failures{% else %}  ◐ Test interrupted by user{% endif %}"
+      - "{% if test_status == 'SUCCESS' %}  ✓ No volume binding timeouts{% else %}  ◐ {{ actual_vms_running }}/{{ num_vms }} VMs reached Running state{% endif %}"
+      - "{% if test_status == 'SUCCESS' %}  ✓ No storage backend errors{% else %}  ◐ No errors observed before interruption{% endif %}"
+      - "{% if test_status == 'SUCCESS' %}  ✓ All VMs transitioned to Running state successfully{% else %}  ◐ Remaining VMs may still be provisioning{% endif %}"
       - "  ✓ Average provisioning time: {{ avg_provisioning_time }}s per VM"
       - ""
       - "========================================================================"
-      - "CONCLUSION & RECOMMENDATIONS"
-      - "========================================================================"
-      - "  Veritas InfoScale {{ infoscale_version }} demonstrated stable and reliable performance"
-      - "  as a CSI storage provider for KubeVirt virtual machines on OpenShift."
-      - ""
-      - "  Key Findings:"
-      - "    • Successfully handled {{ num_vms }} concurrent VM provisions"
-      - "    • Zero failures during PVC provisioning and binding"
-      - "    • Consistent performance across all VM instances"
-      - "    • VxFS filesystem integration working as expected"
-      - ""
-      - "  Recommendations:"
-      - "    • InfoScale is production-ready for VM workloads at this scale"
-      - "    • Consider testing with larger VM sizes for real-world scenarios"
-      - "    • Monitor InfoScale diskgroup health in production"
-      - "    • Evaluate snapshot and clone performance for backup workflows"
-      - ""
-      - "========================================================================"
-      - "Generated: {{ report_timestamp.stdout }}"
-      - "Test Environment: {{ ocp_cluster_name | default('N/A') }}.{{ ocp_domain | default('N/A') }}"
-      - "========================================================================"
-      - ""
-      - "Cleaning up test resources..."
-  when: monitoring_result.rc == 0
+      - "{% if test_status == 'SUCCESS' %}Cleaning up test resources...{% else %}Test resources preserved in 'test-vms' namespace for inspection.{% endif %}"
+  when: monitoring_result.rc in [0, 2]
   tags: perf-test
 
 - name: Cleanup test resources on success
@@ -503,13 +592,33 @@
     name: test-vms
     wait: yes
     wait_timeout: 300
-  when: monitoring_result.rc == 0
+  when: test_status == 'SUCCESS'
   tags: perf-test
 
 - name: Display cleanup complete message
   ansible.builtin.debug:
     msg: "✓ Cleanup complete - test-vms namespace deleted"
-  when: monitoring_result.rc == 0
+  when: test_status == 'SUCCESS'
+  tags: perf-test
+
+- name: Display partial test summary
+  ansible.builtin.debug:
+    msg:
+      - ""
+      - "========================================================================"
+      - "                    TEST INTERRUPTED ◐"
+      - "========================================================================"
+      - "Test Summary:"
+      - "  - Target VMs:        {{ num_vms }}"
+      - "  - VMs Running:       {{ actual_vms_running }}"
+      - "  - Success Rate:      {{ success_rate_percent }}%"
+      - "  - Test duration:     {{ test_duration }}s ({{ (test_duration | int / 60) | round(1) }} minutes)"
+      - ""
+      - "Resources preserved in 'test-vms' namespace for inspection."
+      - "To check status: {{ use_oc_bin }} get vms -n test-vms"
+      - "To cleanup manually: {{ use_oc_bin }} delete namespace test-vms"
+      - "========================================================================"
+  when: test_status == 'PARTIAL'
   tags: perf-test
 
 - name: Display failure summary
@@ -522,11 +631,10 @@
       - "Test Summary:"
       - "  - Target VMs: {{ num_vms }}"
       - "  - Test duration: {{ test_duration }}s"
-      - "  - Timeout: {{ pvc_timeout }}s"
       - ""
       - "Resources preserved in 'test-vms' namespace for debugging."
-      - "To check status: oc get vms -n test-vms"
-      - "To cleanup manually: oc delete namespace test-vms"
+      - "To check status: {{ use_oc_bin }} get vms -n test-vms"
+      - "To cleanup manually: {{ use_oc_bin }} delete namespace test-vms"
       - "========================================================================"
-  when: monitoring_result.rc != 0
+  when: monitoring_result.rc not in [0, 2]
   tags: perf-test

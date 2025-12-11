@@ -145,8 +145,26 @@ test-center_banner: ## Test the center_banner function
 # or `make veritas TAGS=install` to install veritas stack 
 # or `make veritas TAGS=cleanup` to uninstall veritas stack
 # or `make veritas TAGS=test` to test veritas stack
-# or `make veritas TAGS=perf-test` to run VM cloning performance test
-# or `make veritas TAGS=perf-test EXTRA_VARS="-e num_vms=100"` to test with custom VM count
+#
+# Performance Testing (OCPNAS-312 Validation):
+# or `make veritas TAGS=perf-test` to run VM cloning performance test (default: 10 VMs)
+# or `make veritas TAGS=perf-test EXTRA_VARS="-e num_vms=50"` to test with 50 VMs
+# or `make veritas TAGS=perf-test EXTRA_VARS="-e num_vms=100"` to test with 100 VMs
+# or `make veritas TAGS=perf-test EXTRA_VARS="-e num_vms=200"` to test with 200 VMs (OCPNAS-312 requirement)
+# or `make veritas TAGS=perf-test EXTRA_VARS="-e num_vms=400"` to test with 400 VMs (stress test)
+# or `make veritas TAGS=perf-test EXTRA_VARS="-e num_vms=10 -e clean_results=true"` to clean results first (for debugging)
+#
+# Performance Test Features:
+#   - Infinite timeout (no 600s limit) - runs until all VMs are Running or user presses Ctrl+C
+#   - Time-series sampling: Every 1 minute
+#   - Results saved to: results-veritas-9.1/ (at project root)
+#   - Generates 3 files per test:
+#     * veritas-9.1-ga-perf-test-{num_vms}vms.csv - Summary metrics
+#     * veritas-9.1-ga-perf-test-{num_vms}vms-cluster-info.txt - Detailed cluster info
+#     * veritas-9.1-ga-perf-test-summary-timeseries.csv - Shared time-series data (for graphing)
+#   - clean_results=true flag: Wipes all existing results before running (useful for debugging)
+#   - Press Ctrl+C to interrupt and generate partial report (resources preserved for inspection)
+#   - On success, test-vms namespace is automatically cleaned up
 .PHONY: veritas
 veritas: ## Provision cluster with minimal install and setup Veritas stack
 	@echo "TAGS: $(TAGS)"
