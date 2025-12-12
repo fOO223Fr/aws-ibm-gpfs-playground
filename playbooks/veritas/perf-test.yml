@@ -318,7 +318,7 @@
   ansible.builtin.shell: |
     {% if use_kubeconfig %}export KUBECONFIG="{{ use_kubeconfig }}"{% endif %}
     {{ use_oc_bin }} get storageclass infoscale -o json 2>/dev/null | jq -r '
-      "\(.provisioner)|\(.parameters.fstype // "N/A")|\(.allowVolumeExpansion)|\(.reclaimPolicy)"
+      "\(.provisioner)|\(.parameters.fstype // "N/A")|\(.allowVolumeExpansion)|\(.reclaimPolicy)|\(.parameters.layout // "")|\(.parameters.nstripe // "")|\(.parameters.faultTolerance // "")|\(.parameters.mediaType // "")"
     '
   register: storage_info
   changed_when: false
@@ -346,6 +346,10 @@
     storage_fstype: "{{ storage_info.stdout.split('|')[1] | default('vxfs') }}"
     storage_expansion: "{{ storage_info.stdout.split('|')[2] | default('true') }}"
     storage_reclaim: "{{ storage_info.stdout.split('|')[3] | default('Delete') }}"
+    storage_layout: "{{ storage_info.stdout.split('|')[4] | default('') }}"
+    storage_nstripe: "{{ storage_info.stdout.split('|')[5] | default('') }}"
+    storage_fault_tolerance: "{{ storage_info.stdout.split('|')[6] | default('') }}"
+    storage_media_type: "{{ storage_info.stdout.split('|')[7] | default('') }}"
   when: monitoring_result.rc in [0, 2]
   tags: perf-test
 
@@ -434,6 +438,10 @@
         - Volume Expansion:    {{ storage_expansion }}
         - Reclaim Policy:      {{ storage_reclaim }}
         - Binding Mode:        Immediate
+        {{ '- Layout:              ' + storage_layout if storage_layout | length > 0 else '' }}
+        {{ '- Stripe Columns:      ' + storage_nstripe if storage_nstripe | length > 0 else '' }}
+        {{ '- Fault Tolerance:     ' + storage_fault_tolerance if storage_fault_tolerance | length > 0 else '' }}
+        {{ '- Media Type:          ' + storage_media_type if storage_media_type | length > 0 else '' }}
       
       InfoScale Storage Pool:
         - Disk Group Name:     {{ infoscale_dg_name }}
@@ -524,6 +532,10 @@
       - "    - Volume Expansion:  {{ storage_expansion }}"
       - "    - Reclaim Policy:    {{ storage_reclaim }}"
       - "    - Binding Mode:      Immediate"
+      - "{{ '    - Layout:            ' + storage_layout if storage_layout | length > 0 else '' }}"
+      - "{{ '    - Stripe Columns:    ' + storage_nstripe if storage_nstripe | length > 0 else '' }}"
+      - "{{ '    - Fault Tolerance:   ' + storage_fault_tolerance if storage_fault_tolerance | length > 0 else '' }}"
+      - "{{ '    - Media Type:        ' + storage_media_type if storage_media_type | length > 0 else '' }}"
       - ""
       - "  InfoScale Storage Pool:"
       - "    - Disk Group Name:   {{ infoscale_dg_name }}"

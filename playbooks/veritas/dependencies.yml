@@ -1,12 +1,33 @@
+- name: Check if oc is available in PATH
+  ansible.builtin.shell: which oc
+  register: oc_in_path
+  failed_when: false
+  changed_when: false
+  tags: dependencies
+
+- name: Check if already logged in to OCP
+  ansible.builtin.shell: oc whoami
+  register: oc_logged_in
+  failed_when: false
+  changed_when: false
+  when: oc_in_path.rc == 0
+  tags: dependencies
+
+- name: Set OC binary and kubeconfig based on login status
+  ansible.builtin.set_fact:
+    use_oc_bin: "{{ 'oc' if oc_in_path.rc == 0 else oc_bin }}"
+    kubeconfig_param: "{{ (lookup('env', 'HOME') + '/.kube/config') if (oc_logged_in.rc | default(1)) == 0 else kubeconfig }}"
+  tags: dependencies
+
 - name: Apply NFD Operator resources
   kubernetes.core.k8s:
-    kubeconfig: "{{ kubeconfig }}"
+    kubeconfig: "{{ kubeconfig_param }}"
     state: present
     definition: "{{ lookup('file', '../../templates/veritas/nfd-operator.yaml') | from_yaml_all }}"
 
 - name: Wait for NodeFeatureDiscovery CRD to be available
   kubernetes.core.k8s_info:
-    kubeconfig: "{{ kubeconfig }}"
+    kubeconfig: "{{ kubeconfig_param }}"
     api_version: nfd.openshift.io/v1
     kind: NodeFeatureDiscovery
   register: nfd_crd_check
@@ -17,7 +38,7 @@
 
 - name: Apply NodeFeatureDiscovery CR
   kubernetes.core.k8s:
-    kubeconfig: "{{ kubeconfig }}"
+    kubeconfig: "{{ kubeconfig_param }}"
     state: present
     definition: "{{ lookup('file', '../../templates/veritas/nfd-cr.yaml') | from_yaml }}"
   register: nfd_cr_result
@@ -27,19 +48,19 @@
 
 - name: Apply Cert Manager Operator resources
   kubernetes.core.k8s:
-    kubeconfig: "{{ kubeconfig }}"
+    kubeconfig: "{{ kubeconfig_param }}"
     state: present
     definition: "{{ lookup('file', '../../templates/veritas/cert-manager.yaml') | from_yaml_all }}"
 
 - name: Apply Openshift Virtualization resources
   kubernetes.core.k8s:
-    kubeconfig: "{{ kubeconfig }}"
+    kubeconfig: "{{ kubeconfig_param }}"
     state: present
     definition: "{{ lookup('file', '../../templates/veritas/virtualization-operator.yaml') | from_yaml_all }}"
 
 - name: Wait for HyperConverged CRD to be available
   kubernetes.core.k8s_info:
-    kubeconfig: "{{ kubeconfig }}"
+    kubeconfig: "{{ kubeconfig_param }}"
     api_version: hco.kubevirt.io/v1beta1
     kind: HyperConverged
   register: hco_crd_check
@@ -50,7 +71,7 @@
 
 - name: Apply Openshift Virtualization CR
   kubernetes.core.k8s:
-    kubeconfig: "{{ kubeconfig }}"
+    kubeconfig: "{{ kubeconfig_param }}"
     state: present
     definition: "{{ lookup('file', '../../templates/veritas/hyperconverged.yaml') | from_yaml_all }}"
   register: hco_cr_result

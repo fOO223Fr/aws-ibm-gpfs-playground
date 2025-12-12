@@ -1,0 +1,27 @@
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: infoscale
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: org.veritas.infoscale
+parameters:
+  fstype: vxfs
+{% if infoscale_layout is defined and infoscale_layout | length > 0 %}
+  layout: "{{ infoscale_layout }}"
+{% endif %}
+{% if infoscale_nstripe is defined and infoscale_nstripe | int > 0 %}
+  nstripe: "{{ infoscale_nstripe }}"
+{% endif %}
+{% if infoscale_fault_tolerance is defined and infoscale_fault_tolerance | int > 0 %}
+  faultTolerance: "{{ infoscale_fault_tolerance }}"
+{% endif %}
+{% if infoscale_stripe_unit is defined and infoscale_stripe_unit | length > 0 %}
+  stripeUnit: "{{ infoscale_stripe_unit }}"
+{% endif %}
+{% if infoscale_media_type is defined and infoscale_media_type | length > 0 %}
+  mediaType: "{{ infoscale_media_type }}"
+{% endif %}
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
