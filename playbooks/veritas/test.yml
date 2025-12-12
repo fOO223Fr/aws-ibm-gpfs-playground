@@ -1,6 +1,27 @@
+- name: Check if oc is available in PATH
+  ansible.builtin.shell: which oc
+  register: oc_in_path
+  failed_when: false
+  changed_when: false
+  tags: test
+
+- name: Check if already logged in to OCP
+  ansible.builtin.shell: oc whoami
+  register: oc_logged_in
+  failed_when: false
+  changed_when: false
+  when: oc_in_path.rc == 0
+  tags: test
+
+- name: Set OC binary and kubeconfig based on login status
+  ansible.builtin.set_fact:
+    use_oc_bin: "{{ 'oc' if oc_in_path.rc == 0 else oc_bin }}"
+    kubeconfig_param: "{{ (lookup('env', 'HOME') + '/.kube/config') if (oc_logged_in.rc | default(1)) == 0 else kubeconfig }}"
+  tags: test
+
 - name: Get InfoScaleCluster
   kubernetes.core.k8s_info:
-    kubeconfig: "{{ kubeconfig }}"
+    kubeconfig: "{{ kubeconfig_param }}"
     api_version: infoscale.veritas.com/v1
     kind: InfoScaleCluster
     namespace: infoscale-vtas
@@ -8,9 +29,9 @@
   register: isc_info
   tags: test
 
-- name: Get InfoScaleCluster
+- name: Get InfoScaleCluster (verify)
   kubernetes.core.k8s_info:
-    kubeconfig: "{{ kubeconfig }}"
+    kubeconfig: "{{ kubeconfig_param }}"
     api_version: infoscale.veritas.com/v1
     kind: InfoScaleCluster
     namespace: infoscale-vtas
@@ -36,7 +57,7 @@
 
 - name: Deploy PVC + Deployment workload
   kubernetes.core.k8s:
-    kubeconfig: "{{ kubeconfig }}"
+    kubeconfig: "{{ kubeconfig_param }}"
     state: present
     definition: "{{ lookup('file', '../../templates/veritas/test-workload.yaml') }}"
     namespace: default
@@ -44,7 +65,7 @@
 
 - name: Wait for infoscale-claim PVC to be Bound
   kubernetes.core.k8s_info:
-    kubeconfig: "{{ kubeconfig }}"
+    kubeconfig: "{{ kubeconfig_param }}"
     api_version: v1
     kind: PersistentVolumeClaim
     namespace: default
@@ -57,7 +78,7 @@
 
 - name: Wait for containertools Pod to be Running
   kubernetes.core.k8s_info:
-    kubeconfig: "{{ kubeconfig }}"
+    kubeconfig: "{{ kubeconfig_param }}"
     api_version: v1
     kind: Pod
     namespace: default
@@ -73,7 +94,7 @@
 
 - name: Delete containertools Deployment
   kubernetes.core.k8s:
-    kubeconfig: "{{ kubeconfig }}"
+    kubeconfig: "{{ kubeconfig_param }}"
     state: absent
     api_version: apps/v1
     kind: Deployment
@@ -83,7 +104,7 @@
 
 - name: Delete infoscale-claim PVC
   kubernetes.core.k8s:
-    kubeconfig: "{{ kubeconfig }}"
+    kubeconfig: "{{ kubeconfig_param }}"
     state: absent
     api_version: v1
     kind: PersistentVolumeClaim

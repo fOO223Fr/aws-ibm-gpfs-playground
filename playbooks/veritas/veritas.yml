@@ -32,6 +32,11 @@
       tags: ops
       when: "'ops' in ansible_run_tags"
 
+    - name: Recreate InfoScale Cluster
+      include_tasks: cluster-recreate.yml
+      tags: cluster-recreate
+      when: "'cluster-recreate' in ansible_run_tags"
+
     - name: Performance Test for Veritas InfoScale
       include_tasks: perf-test.yml
       tags: perf-test

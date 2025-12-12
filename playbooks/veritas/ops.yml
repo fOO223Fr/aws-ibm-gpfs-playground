@@ -1,24 +1,207 @@
-- name: Get worker nodes
+---
+# Operations tasks for Veritas InfoScale
+# Supports: clean (wipe disks), free-space (show available space)
+
+- name: Check if oc is available in PATH
+  ansible.builtin.shell: which oc
+  register: oc_in_path
+  failed_when: false
+  changed_when: false
+  tags: ops
+
+- name: Check if already logged in to OCP
+  ansible.builtin.shell: oc whoami
+  register: oc_logged_in
+  failed_when: false
+  changed_when: false
+  when: oc_in_path.rc == 0
+  tags: ops
+
+- name: Set OC binary and kubeconfig based on login status
+  ansible.builtin.set_fact:
+    use_oc_bin: "{{ 'oc' if oc_in_path.rc == 0 else oc_bin }}"
+    kubeconfig_param: "{{ (lookup('env', 'HOME') + '/.kube/config') if (oc_logged_in.rc | default(1)) == 0 else kubeconfig }}"
+  tags: ops
+
+- name: Validate operation parameter
+  ansible.builtin.fail:
+    msg: "operation parameter must be set to 'clean' or 'free-space'"
+  when: operation is not defined or operation not in ['clean', 'free-space']
+  tags: ops
+
+- name: Display operation banner
+  ansible.builtin.debug:
+    msg:
+      - "========================================================================"
+      - "           VERITAS INFOSCALE OPERATIONS"
+      - "========================================================================"
+      - "Operation: {{ operation }}"
+      - "========================================================================"
+  tags: ops
+
+# ============================================================================
+# OPERATION: clean (Wipe disk signatures)
+# ============================================================================
+
+- name: Get worker nodes for disk cleaning
   kubernetes.core.k8s_info:
-    kubeconfig: "{{ kubeconfig }}"
+    kubeconfig: "{{ kubeconfig_param }}"
     kind: Node
     label_selectors:
       - "node-role.kubernetes.io/worker"
   register: worker_nodes_info
+  when: operation == 'clean'
   tags: ops
 
 - name: Set worker node names
   set_fact:
     worker_nodes_name_list: >-
       {{ worker_nodes_info.resources | map(attribute='metadata.name') | list }}
+  when: operation == 'clean'
   tags: ops
 
-# assumes the disk is 300gb
-# dd if=/dev/zero of=/dev/nvme1n1 bs=16K count=19660800
-- name: Get boot disk to exclude in infoscale cluster
+- name: Clean all filesystem signatures from disks on all worker nodes
   ansible.builtin.shell: |
-    export KUBECONFIG="{{ kubeconfig }}"
-    oc debug node/{{ worker_nodes_name_list | first }} -- chroot /host bash -c ' 
-    dd if=/dev/zero of=/dev/nvme1n1 bs=16K count=19660800
+    export KUBECONFIG="{{ kubeconfig_param }}"
+    {{ use_oc_bin }} debug node/{{ item }} -- chroot /host bash -c '
+    # Find all nvme devices (excluding boot)
+    boot_partition=$(findmnt -n -o SOURCE /boot 2>/dev/null || findmnt -n -o SOURCE /)
+    boot_disk=$(lsblk -ndo PKNAME "$boot_partition" 2>/dev/null || echo "$boot_partition" | sed "s/p\?[0-9]*$//")
+    [[ "$boot_disk" =~ ^/dev/ ]] || boot_disk="/dev/$boot_disk"
+    
+    echo "Node: $(hostname)"
+    echo "Boot disk: $boot_disk"
+    echo ""
+    
+    for nvme_dev in /dev/nvme[0-9]n[0-9]; do
+      [ -b "$nvme_dev" ] || continue
+      real_dev=$(readlink -f "$nvme_dev")
+      [ "$real_dev" == "$boot_disk" ] && continue
+      
+      # Remove all filesystem signatures using wipefs
+      echo "  Cleaning $nvme_dev..."
+      wipefs -a $nvme_dev 2>/dev/null || true
+    done
+    echo "  ✓ Cleanup complete on $(hostname)"
     '
+  loop: "{{ worker_nodes_name_list }}"
+  register: disk_cleanup
+  when: operation == 'clean'
+  tags: ops
+
+- name: Display disk cleanup results
+  ansible.builtin.debug:
+    msg:
+      - ""
+      - "========================================================================"
+      - "✓ Disk Cleanup Complete"
+      - "========================================================================"
+      - "All non-boot disks have been cleaned on all {{ worker_nodes_name_list | length }} worker nodes."
+      - "Disks are now ready for InfoScale initialization."
+      - "========================================================================"
+  when: operation == 'clean'
+  tags: ops
+
+# ============================================================================
+# OPERATION: free-space (Show available space in disk group)
+# ============================================================================
+
+- name: Get InfoScale SDS pod
+  ansible.builtin.shell: |
+    {{ use_oc_bin }} get pods -l IS-cluster-name=infoscalecluster-dev -n infoscale-vtas -o jsonpath='{.items[0].metadata.name}'
+  environment:
+    KUBECONFIG: "{{ kubeconfig_param }}"
+  register: infoscale_pod
+  when: operation == 'free-space'
+  tags: ops
+
+- name: Get disk group name
+  ansible.builtin.shell: |
+    {{ use_oc_bin }} exec -n infoscale-vtas {{ infoscale_pod.stdout }} -- vxdg -s list | grep -v "NAME" | awk '{print $1}'
+  environment:
+    KUBECONFIG: "{{ kubeconfig_param }}"
+  register: dg_name
+  when: operation == 'free-space'
+  tags: ops
+
+- name: Get disk group info
+  ansible.builtin.shell: |
+    {{ use_oc_bin }} exec -n infoscale-vtas {{ infoscale_pod.stdout }} -- vxdg -s list
+  environment:
+    KUBECONFIG: "{{ kubeconfig_param }}"
+  register: dg_list_output
+  when: operation == 'free-space'
+  tags: ops
+
+- name: Get free space info
+  ansible.builtin.shell: |
+    {{ use_oc_bin }} exec -n infoscale-vtas {{ infoscale_pod.stdout }} -- vxdg -g {{ dg_name.stdout }} free
+  environment:
+    KUBECONFIG: "{{ kubeconfig_param }}"
+  register: dg_free_output
+  when: operation == 'free-space'
+  tags: ops
+
+- name: Calculate free space
+  ansible.builtin.shell: |
+    TOTAL_SECTORS=$(echo '{{ dg_free_output.stdout }}' | grep -v "DISK" | awk '{sum += $5} END {print sum}')
+    TOTAL_BYTES=$(( TOTAL_SECTORS * 512 ))
+    
+    # Convert to human readable
+    if [ $TOTAL_BYTES -ge 1099511627776 ]; then
+      FREE_TB=$(echo "scale=2; $TOTAL_BYTES / 1099511627776" | bc)
+      echo "${FREE_TB}TB"
+    elif [ $TOTAL_BYTES -ge 1073741824 ]; then
+      FREE_GB=$(echo "scale=2; $TOTAL_BYTES / 1073741824" | bc)
+      echo "${FREE_GB}GB"
+    else
+      FREE_MB=$(echo "scale=2; $TOTAL_BYTES / 1048576" | bc)
+      echo "${FREE_MB}MB"
+    fi
+    
+    echo "$TOTAL_SECTORS" > /tmp/sectors
+    echo "$TOTAL_BYTES" > /tmp/bytes
+  register: free_space_calc
+  when: operation == 'free-space'
+  tags: ops
+
+- name: Read calculated values
+  ansible.builtin.shell: cat /tmp/sectors && cat /tmp/bytes
+  register: space_values
+  when: operation == 'free-space'
+  tags: ops
+
+- name: Set space facts
+  ansible.builtin.set_fact:
+    total_sectors: "{{ space_values.stdout_lines[0] }}"
+    total_bytes: "{{ space_values.stdout_lines[1] }}"
+    free_space_readable: "{{ free_space_calc.stdout_lines[0] }}"
+  when: operation == 'free-space'
+  tags: ops
+
+- name: Display disk group information
+  ansible.builtin.debug:
+    msg:
+      - ""
+      - "========================================================================"
+      - "           INFOSCALE DISK GROUP INFORMATION"
+      - "========================================================================"
+      - "Disk Group: {{ dg_name.stdout }}"
+      - ""
+      - "Disk Group Details:"
+      - "{{ dg_list_output.stdout }}"
+      - ""
+      - "------------------------------------------------------------------------"
+      - "Free Space Breakdown:"
+      - "{{ dg_free_output.stdout }}"
+      - ""
+      - "========================================================================"
+      - "           AVAILABLE SPACE SUMMARY"
+      - "========================================================================"
+      - "  Disk Group:     {{ dg_name.stdout }}"
+      - "  Total Sectors:  {{ total_sectors }} sectors (512 bytes/sector)"
+      - "  Total Bytes:    {{ total_bytes }} bytes"
+      - "  Available:      {{ free_space_readable }}"
+      - "========================================================================"
+  when: operation == 'free-space'
   tags: ops

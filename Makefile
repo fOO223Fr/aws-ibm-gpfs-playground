@@ -142,9 +142,17 @@ test-center_banner: ## Test the center_banner function
 # Usage: `make veritas POWER90=true`
 # This will provision a baremetal cluster with minimal OCP install and setup the Veritas stack.
 # or `make veritas TAGS=dependencies` to just install dependencies
-# or `make veritas TAGS=install` to install veritas stack 
+# or `make veritas TAGS=install` to install veritas stack (auto-detects all non-boot disks)
 # or `make veritas TAGS=cleanup` to uninstall veritas stack
 # or `make veritas TAGS=test` to test veritas stack
+#
+# Cluster Management:
+# or `make veritas TAGS=cluster-recreate` to delete and recreate InfoScaleCluster (auto-detects disks)
+# or `make veritas TAGS=cluster-recreate EXTRA_VARS="-e manual_disk_selection=true"` to manually select disks
+#
+# Operations:
+# or `make veritas TAGS=ops EXTRA_VARS="-e operation=clean"` to wipe all non-boot disks (wipefs)
+# or `make veritas TAGS=ops EXTRA_VARS="-e operation=free-space"` to show available space in disk group
 #
 # Performance Testing (OCPNAS-312 Validation):
 # or `make veritas TAGS=perf-test` to run VM cloning performance test (default: 10 VMs)

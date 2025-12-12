@@ -1,0 +1,311 @@
+---
+# Cluster Recreate tasks for Veritas InfoScale
+# Deletes and recreates InfoScaleCluster with new disk configuration
+
+- name: Check if oc is available in PATH
+  ansible.builtin.shell: which oc
+  register: oc_in_path
+  failed_when: false
+  changed_when: false
+  tags: cluster-recreate
+
+- name: Check if already logged in to OCP
+  ansible.builtin.shell: oc whoami
+  register: oc_logged_in
+  failed_when: false
+  changed_when: false
+  when: oc_in_path.rc == 0
+  tags: cluster-recreate
+
+- name: Set OC binary and kubeconfig based on login status
+  ansible.builtin.set_fact:
+    use_oc_bin: "{{ 'oc' if oc_in_path.rc == 0 else oc_bin }}"
+    kubeconfig_param: "{{ (lookup('env', 'HOME') + '/.kube/config') if (oc_logged_in.rc | default(1)) == 0 else kubeconfig }}"
+  tags: cluster-recreate
+
+- name: Validate manual_disk_selection flag usage
+  ansible.builtin.fail:
+    msg: "manual_disk_selection flag can only be used with TAGS=cluster-recreate"
+  when: 
+    - manual_disk_selection | default(false) | bool
+    - "'cluster-recreate' not in ansible_run_tags"
+  tags: always
+
+- name: Set manual_disk_selection default
+  ansible.builtin.set_fact:
+    manual_disk_selection: "{{ manual_disk_selection | default(false) | bool }}"
+  tags: cluster-recreate
+
+- name: Display cluster recreate banner
+  ansible.builtin.debug:
+    msg:
+      - "========================================================================"
+      - "           VERITAS INFOSCALE CLUSTER RECREATE"
+      - "========================================================================"
+      - "Mode: {{ 'Manual Disk Selection' if manual_disk_selection else 'Auto-Detection' }}"
+      - ""
+      - "This will:"
+      - "  1. Delete existing InfoScaleCluster"
+      - "  2. Delete StorageClass and VolumeSnapshotClass"
+      - "  3. Wait for cleanup to complete"
+      - "  4. {{ 'Prompt for disk selection' if manual_disk_selection else 'Auto-detect multi-attach io2 volumes' }}"
+      - "  5. Recreate InfoScaleCluster with selected disks"
+      - "  6. Recreate StorageClass and VolumeSnapshotClass"
+      - "========================================================================"
+  tags: cluster-recreate
+
+- name: Delete InfoScaleCluster
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_param }}"
+    state: absent
+    api_version: infoscale.veritas.com/v1
+    kind: InfoScaleCluster
+    namespace: infoscale-vtas
+    name: infoscalecluster-dev
+    wait: yes
+    wait_timeout: 300
+  tags: cluster-recreate
+
+- name: Delete InfoScale StorageClass
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_param }}"
+    state: absent
+    definition: "{{ lookup('file', '../../templates/veritas/storageclass.yaml') }}"
+  tags: cluster-recreate
+
+- name: Delete VolumeSnapshotClass
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_param }}"
+    state: absent
+    definition: "{{ lookup('file', '../../templates/veritas/snapshotclass.yaml') }}"
+  tags: cluster-recreate
+
+- name: Wait for cleanup to complete
+  ansible.builtin.pause:
+    seconds: 10
+    prompt: "Waiting for resources to be cleaned up..."
+  tags: cluster-recreate
+
+- name: Get worker nodes
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_param }}"
+    kind: Node
+    label_selectors:
+      - "node-role.kubernetes.io/worker"
+  register: worker_nodes_info
+  tags: cluster-recreate
+
+- name: Set worker node names
+  set_fact:
+    worker_nodes_name_list: >-
+      {{ worker_nodes_info.resources | map(attribute='metadata.name') | list }}
+  tags: cluster-recreate
+
+- name: Clean all filesystem signatures from disks on all worker nodes
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ kubeconfig_param }}"
+    {{ use_oc_bin }} debug node/{{ item }} -- chroot /host bash -c '
+    # Find all nvme devices (excluding boot)
+    boot_partition=$(findmnt -n -o SOURCE /boot 2>/dev/null || findmnt -n -o SOURCE /)
+    boot_disk=$(lsblk -ndo PKNAME "$boot_partition" 2>/dev/null || echo "$boot_partition" | sed "s/p\?[0-9]*$//")
+    [[ "$boot_disk" =~ ^/dev/ ]] || boot_disk="/dev/$boot_disk"
+    
+    for nvme_dev in /dev/nvme[0-9]n[0-9]; do
+      [ -b "$nvme_dev" ] || continue
+      real_dev=$(readlink -f "$nvme_dev")
+      [ "$real_dev" == "$boot_disk" ] && continue
+      
+      # Remove all filesystem signatures using wipefs
+      echo "Cleaning $nvme_dev..."
+      wipefs -a $nvme_dev 2>/dev/null || true
+    done
+    echo "Disk cleanup complete on $(hostname)"
+    '
+  loop: "{{ worker_nodes_name_list }}"
+  register: disk_cleanup
+  tags: cluster-recreate
+
+- name: Display disk cleanup results
+  ansible.builtin.debug:
+    msg: "✓ Cleaned VxVM metadata from all disks on all worker nodes"
+  tags: cluster-recreate
+
+- name: Wait for disk cleanup to settle
+  ansible.builtin.pause:
+    seconds: 5
+  tags: cluster-recreate
+
+- name: Auto-detect available disks on first worker node
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ kubeconfig_param }}"
+    {{ use_oc_bin }} debug node/{{ worker_nodes_name_list | first }} -- chroot /host bash -c '
+    echo "Available Disks:"
+    echo "----------------"
+    
+    # Get boot disk
+    boot_partition=$(findmnt -n -o SOURCE /boot 2>/dev/null || findmnt -n -o SOURCE /)
+    boot_disk=$(lsblk -ndo PKNAME "$boot_partition" 2>/dev/null || echo "$boot_partition" | sed "s/p\?[0-9]*$//")
+    [[ "$boot_disk" =~ ^/dev/ ]] || boot_disk="/dev/$boot_disk"
+    
+    # Find all nvme devices
+    for nvme_dev in /dev/nvme[0-9]n[0-9]; do
+      [ -b "$nvme_dev" ] || continue
+      
+      # Skip if boot disk
+      real_dev=$(readlink -f "$nvme_dev")
+      [ "$real_dev" == "$boot_disk" ] && continue
+      
+      # Get size
+      size=$(lsblk -b -d -n -o SIZE "$nvme_dev" | awk "{printf \"%.0fGB\", \$1/1024/1024/1024}")
+      
+      # Get by-path
+      by_path=$(ls -l /dev/disk/by-path/ | grep "$(basename $nvme_dev)\$" | awk "{print \$9}" | head -1)
+      
+      # Get volume ID from by-id
+      vol_id=$(ls -l /dev/disk/by-id/ | grep "Amazon_Elastic_Block_Store_vol" | grep "$(basename $nvme_dev)\$" | grep -v "_1" | awk "{print \$9}" | head -1 | grep -oP "vol[0-9a-f]+")
+      
+      if [ -n "$by_path" ]; then
+        echo "/dev/disk/by-path/$by_path|$size|$vol_id|$nvme_dev"
+      fi
+    done
+    '
+  register: available_disks_raw
+  changed_when: false
+  tags: cluster-recreate
+
+- name: Parse available disks
+  ansible.builtin.set_fact:
+    available_disks: "{{ available_disks_raw.stdout_lines | select('match', '^/dev/disk/by-path/') | list }}"
+  tags: cluster-recreate
+
+- name: Build disk table lines
+  ansible.builtin.set_fact:
+    disk_lines: "{{ disk_lines | default([]) + ['%3d   %-50s %s' | format(ansible_loop.index, item.split('|')[0], item.split('|')[1])] }}"
+  loop: "{{ available_disks }}"
+  loop_control:
+    extended: yes
+  when: manual_disk_selection
+  tags: cluster-recreate
+
+- name: Display available disks table
+  ansible.builtin.debug:
+    msg: "{{ ['', '=======================================================================', '                    AVAILABLE DISKS', '=======================================================================', 'Num   Device Path (by-path)                             Size', '-----------------------------------------------------------------------'] + disk_lines + ['======================================================================='] }}"
+  when: manual_disk_selection
+  tags: cluster-recreate
+
+- name: Prompt for disk selection
+  ansible.builtin.pause:
+    prompt: |
+      
+      Enter disk numbers to include (comma-separated, e.g., 1,2 or 1):
+  register: disk_selection_input
+  when: manual_disk_selection
+  tags: cluster-recreate
+
+- name: Parse selected disks from manual input
+  ansible.builtin.set_fact:
+    selected_disk_indices: "{{ disk_selection_input.user_input.split(',') | map('trim') | map('int') | list }}"
+  when: manual_disk_selection
+  tags: cluster-recreate
+
+- name: Build selected devices list
+  ansible.builtin.set_fact:
+    infoscale_include_devices: "{{ infoscale_include_devices | default([]) + [available_disks[item - 1].split('|')[0]] }}"
+  loop: "{{ selected_disk_indices }}"
+  when: manual_disk_selection
+  tags: cluster-recreate
+
+- name: Auto-select all available disks
+  ansible.builtin.set_fact:
+    infoscale_include_devices: "{{ available_disks | map('split', '|') | map('first') | list }}"
+  when: 
+    - not manual_disk_selection
+    - infoscale_include_devices is not defined
+  tags: cluster-recreate
+
+- name: Build selected disks lines
+  ansible.builtin.set_fact:
+    selected_lines: "{{ selected_lines | default([]) + ['  ' + ansible_loop.index | string + '. ' + item] }}"
+  loop: "{{ infoscale_include_devices }}"
+  loop_control:
+    extended: yes
+  tags: cluster-recreate
+
+- name: Display selected disks
+  ansible.builtin.debug:
+    msg: "{{ ['', '========================================================================', '                SELECTED DISKS FOR INFOSCALE', '========================================================================'] + selected_lines + ['', 'Total Disks: ' + (infoscale_include_devices | length | string), '========================================================================'] }}"
+  tags: cluster-recreate
+
+- name: Confirm before proceeding
+  ansible.builtin.pause:
+    prompt: "Proceed with cluster creation using these disks? Press Enter to continue or Ctrl+C to abort"
+  when: manual_disk_selection
+  tags: cluster-recreate
+
+- name: Deploy InfoScaleCluster with selected disks
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_param }}"
+    state: present
+    definition: "{{ lookup('template', '../../templates/veritas/infoscale-cluster.yaml.j2') }}"
+  register: infoscale_cluster_result
+  retries: 10
+  delay: 5
+  until: infoscale_cluster_result is succeeded
+  tags: cluster-recreate
+
+- name: Ensure gp3-csi StorageClass is not default
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_param }}"
+    api_version: storage.k8s.io/v1
+    kind: StorageClass
+    name: gp3-csi
+    definition:
+      metadata:
+        annotations:
+          storageclass.kubernetes.io/is-default-class: "false"
+    merge_type: merge
+  tags: cluster-recreate
+
+- name: Create InfoScale StorageClass as default
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_param }}"
+    state: present
+    definition: "{{ lookup('file', '../../templates/veritas/storageclass.yaml') }}"
+  tags: cluster-recreate
+
+- name: Create VolumeSnapshotClass
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_param }}"
+    state: present
+    definition: "{{ lookup('file', '../../templates/veritas/snapshotclass.yaml') }}"
+  tags: cluster-recreate
+
+- name: Patch StorageProfile (accessModes and cloneStrategy)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_param }}"
+    api_version: cdi.kubevirt.io/v1beta1
+    kind: StorageProfile
+    name: infoscale
+    definition:
+      spec:
+        claimPropertySets:
+          - accessModes: ["ReadWriteOnce"]
+            volumeMode: "Filesystem"
+        cloneStrategy: csi-clone
+    merge_type: merge
+  tags: cluster-recreate
+
+- name: Display cluster recreate complete
+  ansible.builtin.debug:
+    msg:
+      - ""
+      - "========================================================================"
+      - "           INFOSCALE CLUSTER RECREATE COMPLETE"
+      - "========================================================================"
+      - "InfoScaleCluster 'infoscalecluster-dev' has been recreated with:"
+      - "{% for device in infoscale_include_devices %}  - {{ device }}{% endfor %}"
+      - ""
+      - "StorageClass 'infoscale' is now the default storage class."
+      - "========================================================================"
+  tags: cluster-recreate
+

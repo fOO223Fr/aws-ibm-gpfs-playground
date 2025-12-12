@@ -10,10 +10,13 @@ spec:
   isSharedStorage: true
   version: 9.1.0
   clusterInfo:
-{% for node in worker_nodes_name_list %}
-    - nodeName: {{ node }}
-{% if boot_disk_by_path | length > 0 %}
-      excludeDevice:
-        - "{{ boot_disk_by_path }}"
+    - nodeName: {{ worker_nodes_name_list[0] }}
+{% if infoscale_include_devices is defined and infoscale_include_devices | length > 0 %}
+      includeDevices:
+{% for device in infoscale_include_devices %}
+        - "{{ device }}"
+{% endfor %}
 {% endif %}
+{% for node in worker_nodes_name_list[1:] %}
+    - nodeName: {{ node }}
 {% endfor %}

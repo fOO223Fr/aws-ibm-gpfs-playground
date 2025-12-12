@@ -38,36 +38,50 @@
     worker_nodes_name_list: >-
       {{ worker_nodes_info.resources | map(attribute='metadata.name') | list }}
 
-# Get boot_disk_by_path just for one worker node. it is name in others usually
-- name: Get boot disk to exclude in infoscale cluster
+- name: Auto-detect available disks on first worker node (if not specified)
   ansible.builtin.shell: |
     export KUBECONFIG="{{ kubeconfig }}"
     oc debug node/{{ worker_nodes_name_list | first }} -- chroot /host bash -c '
-    # Try /boot first, fall back to finding the parent device of root
+    # Get boot disk to exclude
     boot_partition=$(findmnt -n -o SOURCE /boot 2>/dev/null || findmnt -n -o SOURCE /)
-    if [[ -b "$boot_partition" ]]; then
-      # Get the parent device (strip partition number)
-      boot_disk=$(lsblk -ndo PKNAME "$boot_partition" 2>/dev/null || echo "$boot_partition" | sed "s/p\?[0-9]*$//")
-      # Ensure we have /dev/ prefix
-      [[ "$boot_disk" =~ ^/dev/ ]] || boot_disk="/dev/$boot_disk"
-      # Find the by-path entry
-      for d in /dev/disk/by-path/*; do
-        if [[ "$(readlink -f "$d")" == "$boot_disk" ]]; then
-          echo "$d"
-          break
-        fi
-      done
-    fi
+    boot_disk=$(lsblk -ndo PKNAME "$boot_partition" 2>/dev/null || echo "$boot_partition" | sed "s/p\?[0-9]*$//")
+    [[ "$boot_disk" =~ ^/dev/ ]] || boot_disk="/dev/$boot_disk"
+    
+    # Find all nvme devices (excluding boot disk)
+    for nvme_dev in /dev/nvme[0-9]n[0-9]; do
+      [ -b "$nvme_dev" ] || continue
+      
+      # Skip if boot disk
+      real_dev=$(readlink -f "$nvme_dev")
+      [ "$real_dev" == "$boot_disk" ] && continue
+      
+      # Get by-path
+      by_path=$(ls -l /dev/disk/by-path/ | grep "$(basename $nvme_dev)\$" | awk "{print \$9}" | head -1)
+      
+      if [ -n "$by_path" ]; then
+        echo "/dev/disk/by-path/$by_path"
+      fi
+    done
     '
-  register: boot_disk_by_path
+  register: detected_disks_raw
+  changed_when: false
+  when: infoscale_include_devices is not defined
 
-- name: Set boot disk_by_path_map
-  set_fact:
-    boot_disk_by_path: "{{ boot_disk_by_path.stdout }}"
+- name: Set auto-detected disks
+  ansible.builtin.set_fact:
+    infoscale_include_devices: "{{ detected_disks_raw.stdout_lines | select('match', '^/dev/disk/by-path/') | list }}"
+  when: infoscale_include_devices is not defined
 
-- name: Display boot disk detection result
-  debug:
-    msg: "Boot disk by-path: {{ boot_disk_by_path if boot_disk_by_path | length > 0 else 'NOT FOUND - InfoScaleCluster will use all available disks' }}"
+- name: Display detected disks for InfoScale
+  ansible.builtin.debug:
+    msg:
+      - "========================================================================"
+      - "Auto-detected disks for InfoScale cluster:"
+      - "{% for device in infoscale_include_devices %}  - {{ device }}{% endfor %}"
+      - ""
+      - "Total: {{ infoscale_include_devices | length }} disk(s)"
+      - "========================================================================"
+  when: infoscale_include_devices | length > 0
 
 - name: Deploy InfoScaleCluster
   kubernetes.core.k8s:
